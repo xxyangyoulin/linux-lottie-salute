@@ -8,6 +8,18 @@ A lightweight Lottie animation overlay for Wayland and X11. Plays a Lottie anima
 
 [Download demo video](./demo.mp4)
 
+## Fun Use with Codex
+
+You can use `lottie-salute` as a fun completion effect for each Codex turn.
+
+Add this to `~/.codex/config.toml`:
+
+```toml
+notify = ["sh", "-lc", "lottie-salute --asset /home/yyl/Documents/Confetti.json --flip --pos-x 1.07 --pos-y -0.03 --fade-in --fade-out --fade-in-ms 300 --fade-out-ms 100 >/dev/null 2>&1 &"]
+```
+
+Then restart `codex` interactive mode.
+
 ## Quick Start
 
 ```bash
