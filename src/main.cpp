@@ -38,6 +38,7 @@ static void print_usage(const char* prog) {
     printf("  --fade-out       Enable fade-out at end\n");
     printf("  --fade-in-ms N   Fade-in duration in ms (default: 800)\n");
     printf("  --fade-out-ms N  Fade-out duration in ms (default: 800)\n");
+    printf("  --gpu MODE       Wayland GPU mode: auto|on|off (default: auto)\n");
     printf("  -h, --help       Show this help\n");
 }
 
@@ -98,6 +99,9 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { fprintf(stderr, "Missing value for --fade-out-ms\n"); return 1; }
             opts.fade_out_ms = std::atoi(argv[++i]);
             opts.fade_out = true;
+        } else if (key == "--gpu") {
+            if (i + 1 >= argc) { fprintf(stderr, "Missing value for --gpu\n"); return 1; }
+            opts.gpu = argv[++i];
         } else if (key == "-h" || key == "--help") {
             print_usage(argv[0]);
             return 0;
@@ -109,6 +113,10 @@ int main(int argc, char** argv) {
 
     if (opts.asset_path.empty()) {
         fprintf(stderr, "Usage: %s --asset PATH [OPTIONS]\nTry '%s --help' for more information.\n", argv[0], argv[0]);
+        return 1;
+    }
+    if (opts.gpu != "auto" && opts.gpu != "on" && opts.gpu != "off") {
+        fprintf(stderr, "Invalid --gpu: %s (expected auto, on, or off)\n", opts.gpu.c_str());
         return 1;
     }
 

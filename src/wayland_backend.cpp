@@ -4,6 +4,11 @@
 #include <wayland-client.h>
 #include <wlr-layer-shell-client-protocol.h>
 #include <xdg-output-unstable-v1-client-protocol.h>
+#ifdef ENABLE_WAYLAND_GPU
+#include <wayland-egl.h>
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -29,6 +34,8 @@ extern "C" const struct wl_interface xdg_popup_interface = {"xdg_popup", 0, 0, n
 namespace codex_salute {
 
 extern volatile sig_atomic_t g_interrupted;
+
+class WaylandBackend;
 
 // ── SHM helpers ─────────────────────────────────────────────────────────────
 
@@ -86,6 +93,7 @@ struct ShmBuffer {
 // ── Per-output state ────────────────────────────────────────────────────────
 
 struct OutputState {
+    WaylandBackend* owner = nullptr;
     wl_output* output = nullptr;
     wl_surface* surface = nullptr;
     wl_region* input_region = nullptr;
@@ -97,7 +105,16 @@ struct OutputState {
     int mode_w = 0, mode_h = 0;
     bool configured = false;
     bool has_geometry = false;
+    bool gpu_ready = false;
     std::unique_ptr<ShmBuffer> buf;
+    std::vector<uint32_t> tmp;
+#ifdef ENABLE_WAYLAND_GPU
+    wl_egl_window* egl_window = nullptr;
+    EGLSurface egl_surface = EGL_NO_SURFACE;
+    GLuint texture = 0;
+    int tex_w = 0;
+    int tex_h = 0;
+#endif
 };
 
 // ── WaylandBackend ──────────────────────────────────────────────────────────
@@ -106,11 +123,15 @@ class WaylandBackend {
 public:
     int run(const AppOptions& opts) {
         opts_ = &opts;
+        auto finish = [&](int code) {
+            cleanup();
+            return code;
+        };
 
         animation_info_ = load_animation(opts.asset_path.c_str());
         if (!animation_info_.animation) {
             fprintf(stderr, "[salute] failed to load: %s\n", opts.asset_path.c_str());
-            return 1;
+            return finish(1);
         }
         printf("[salute] loaded: %dx%d frames=%d fps=%.1f duration=%dms\n",
                animation_info_.width, animation_info_.height,
@@ -120,7 +141,7 @@ public:
         display_ = wl_display_connect(nullptr);
         if (!display_) {
             fprintf(stderr, "[salute] failed to connect to Wayland display\n");
-            return 1;
+            return finish(1);
         }
 
         registry_ = wl_display_get_registry(display_);
@@ -128,14 +149,41 @@ public:
         wl_display_roundtrip(display_);
         wl_display_roundtrip(display_);
 
-        if (!shm_ || !compositor_ || !layer_shell_) {
+        if (!compositor_ || !layer_shell_) {
             fprintf(stderr, "[salute] required Wayland protocols missing\n");
-            return 1;
+            return finish(1);
         }
 
-        if (!has_argb8888_) {
-            fprintf(stderr, "[salute] ARGB8888 SHM format not supported\n");
-            return 1;
+        bool want_gpu = opts_->gpu != "off";
+#ifndef ENABLE_WAYLAND_GPU
+        if (opts_->gpu == "on") {
+            fprintf(stderr, "[salute] GPU path was requested but this build has no Wayland GPU support\n");
+            return finish(1);
+        }
+#else
+        if (want_gpu) {
+            gpu_enabled_ = init_gpu();
+            if (!gpu_enabled_ && opts_->gpu == "on") {
+                fprintf(stderr, "[salute] failed to initialize Wayland GPU path\n");
+                return finish(1);
+            }
+            if (!gpu_enabled_ && opts_->gpu == "auto") {
+                printf("[salute] GPU path unavailable, falling back to SHM CPU path\n");
+            }
+        }
+#endif
+        if (gpu_enabled_) {
+            printf("[salute] wayland renderer=gpu\n");
+        } else {
+            if (!shm_) {
+                fprintf(stderr, "[salute] wl_shm is required for CPU path but is unavailable\n");
+                return finish(1);
+            }
+            if (!has_argb8888_) {
+                fprintf(stderr, "[salute] ARGB8888 SHM format not supported\n");
+                return finish(1);
+            }
+            printf("[salute] wayland renderer=cpu\n");
         }
 
         if (xdg_output_manager_) {
@@ -167,12 +215,14 @@ public:
 
         if (outputs_.empty()) {
             OutputState os;
+            os.owner = this;
             os.width = 1920; os.height = 1080;
             os.shm = shm_;
             outputs_.push_back(std::move(os));
         }
 
         for (auto& os : outputs_) {
+            os.owner = this;
             os.shm = shm_;
             create_layer_surface(os);
         }
@@ -190,6 +240,9 @@ public:
             : (!opts_->loop ? static_cast<int>(animation_info_.duration_ms / speed) : 0);
         auto next_frame = start;
         int64_t first_render_elapsed_ms = -1;
+        int no_target_ticks = 0;
+        bool runtime_gpu_fallback_attempted = false;
+        int max_no_target_ticks = std::max(60, target_fps * 2);
 
         while (!g_interrupted) {
             wl_display_dispatch_pending(display_);
@@ -208,12 +261,26 @@ public:
 
             bool has_render_target = false;
             for (const auto& os : outputs_) {
-                if (os.configured && os.buf) {
+                if (os.configured && (gpu_enabled_ ? os.gpu_ready : static_cast<bool>(os.buf))) {
                     has_render_target = true;
                     break;
                 }
             }
             if (!has_render_target) {
+                ++no_target_ticks;
+#ifdef ENABLE_WAYLAND_GPU
+                if (gpu_enabled_ && opts_->gpu == "auto" && !runtime_gpu_fallback_attempted) {
+                    runtime_gpu_fallback_attempted = true;
+                    if (fallback_to_cpu_from_gpu("runtime GPU output setup failed")) {
+                        no_target_ticks = 0;
+                        continue;
+                    }
+                }
+#endif
+                if (no_target_ticks >= max_no_target_ticks) {
+                    fprintf(stderr, "[salute] no render target became available\n");
+                    break;
+                }
                 next_frame += std::chrono::microseconds(frame_dur_us);
                 auto now = std::chrono::steady_clock::now();
                 if (next_frame > now) {
@@ -221,6 +288,7 @@ public:
                 }
                 continue;
             }
+            no_target_ticks = 0;
             if (first_render_elapsed_ms < 0) first_render_elapsed_ms = elapsed_ms;
             const int64_t visible_elapsed_ms = elapsed_ms - first_render_elapsed_ms;
             const int visible_total_ms = max_duration_ms > 0
@@ -242,8 +310,13 @@ public:
             }
 
             for (auto& os : outputs_) {
-                if (os.configured && os.buf) {
-                    render_frame(os, frame, fade_factor);
+                if (!os.configured) continue;
+                if (gpu_enabled_) {
+#ifdef ENABLE_WAYLAND_GPU
+                    if (os.gpu_ready) render_frame_gpu(os, frame, fade_factor);
+#endif
+                } else {
+                    if (os.buf) render_frame(os, frame, fade_factor);
                 }
             }
 
@@ -256,23 +329,37 @@ public:
             }
         }
 
-        // Cleanup
-        for (auto& os : outputs_) {
-            os.buf.reset();
-            if (os.input_region) wl_region_destroy(os.input_region);
-            if (os.surface) wl_surface_attach(os.surface, nullptr, 0, 0);
-            if (os.layer_surface) zwlr_layer_surface_v1_destroy(os.layer_surface);
-            if (os.xdg_output) zxdg_output_v1_destroy(os.xdg_output);
-            if (os.surface) wl_surface_destroy(os.surface);
-        }
-        if (xdg_output_manager_) zxdg_output_manager_v1_destroy(xdg_output_manager_);
-        if (layer_shell_) zwlr_layer_shell_v1_destroy(layer_shell_);
-        wl_registry_destroy(registry_);
-        wl_display_disconnect(display_);
-        return 0;
+        return finish(0);
     }
 
 private:
+    void configure_output(OutputState& os) {
+        if (gpu_enabled_) {
+#ifdef ENABLE_WAYLAND_GPU
+            if (!ensure_gpu_output(os)) {
+                fprintf(stderr, "[salute] failed to initialize GPU output %dx%d\n", os.width, os.height);
+                os.configured = false;
+                os.gpu_ready = false;
+                return;
+            }
+            os.configured = true;
+            printf("[salute] output configured size=%dx%d (gpu)\n", os.width, os.height);
+#endif
+            return;
+        }
+
+        if (!os.buf || os.buf->width != os.width || os.buf->height != os.height) {
+            os.buf = std::make_unique<ShmBuffer>();
+            if (!os.buf->create(os.shm, os.width, os.height)) {
+                fprintf(stderr, "[salute] failed to create SHM buffer %dx%d\n", os.width, os.height);
+                os.configured = false;
+                return;
+            }
+        }
+        os.configured = true;
+        printf("[salute] output configured size=%dx%d (cpu)\n", os.width, os.height);
+    }
+
     void render_frame(OutputState& os, int frame, double fade_factor) {
         if (!os.buf || !os.buf->data) return;
 
@@ -288,10 +375,12 @@ private:
         int rx, ry, rw, rh;
         compute_rect(os.width, os.height, animation_info_.width, animation_info_.height,
                      cfg, rx, ry, rw, rh);
+        if (rw <= 0 || rh <= 0) return;
 
         // Render at target resolution for crisp edges
-        std::vector<uint32_t> tmp(static_cast<size_t>(rw * rh));
-        render_lottie_frame(*animation_info_.animation, frame, tmp, rw, rh);
+        const size_t tmp_size = static_cast<size_t>(rw) * static_cast<size_t>(rh);
+        if (os.tmp.size() != tmp_size) os.tmp.resize(tmp_size);
+        render_lottie_frame(*animation_info_.animation, frame, os.tmp, rw, rh);
 
         // Partial clear
         int x_start = std::max(0, -rx);
@@ -305,11 +394,304 @@ private:
         }
 
         blit_to_dst(os.buf->data, os.width, os.width, os.height,
-                    tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity);
+                    os.tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity);
 
         wl_surface_attach(os.surface, os.buf->buffer, 0, 0);
-        wl_surface_damage_buffer(os.surface, 0, 0, os.width, os.height);
+        if (x_end > x_start && y_end > y_start) {
+            wl_surface_damage_buffer(
+                os.surface,
+                rx + x_start,
+                ry + y_start,
+                x_end - x_start,
+                y_end - y_start);
+        }
         wl_surface_commit(os.surface);
+    }
+
+#ifdef ENABLE_WAYLAND_GPU
+    bool fallback_to_cpu_from_gpu(const char* reason) {
+        if (opts_->gpu != "auto") return false;
+        printf("[salute] %s, falling back to SHM CPU path\n", reason);
+
+        for (auto& os : outputs_) {
+            destroy_gpu_output(os);
+            os.configured = false;
+        }
+        shutdown_gpu();
+        gpu_enabled_ = false;
+
+        if (!shm_ || !has_argb8888_) return false;
+
+        bool has_cpu_target = false;
+        for (auto& os : outputs_) {
+            if (os.width <= 0 || os.height <= 0) continue;
+            configure_output(os);
+            if (os.configured && os.buf) has_cpu_target = true;
+        }
+        return has_cpu_target;
+    }
+
+    static GLuint compile_shader(GLenum type, const char* src) {
+        GLuint shader = glCreateShader(type);
+        glShaderSource(shader, 1, &src, nullptr);
+        glCompileShader(shader);
+        GLint ok = 0;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[1024];
+            GLsizei len = 0;
+            glGetShaderInfoLog(shader, sizeof(log), &len, log);
+            fprintf(stderr, "[salute] shader compile failed: %.*s\n", static_cast<int>(len), log);
+            glDeleteShader(shader);
+            return 0;
+        }
+        return shader;
+    }
+
+    bool init_gpu() {
+        egl_display_ = eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(display_));
+        if (egl_display_ == EGL_NO_DISPLAY) return false;
+        if (!eglInitialize(egl_display_, nullptr, nullptr)) return false;
+
+        static const EGLint cfg_attrs[] = {
+            EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+            EGL_RED_SIZE, 8,
+            EGL_GREEN_SIZE, 8,
+            EGL_BLUE_SIZE, 8,
+            EGL_ALPHA_SIZE, 8,
+            EGL_NONE
+        };
+        EGLint num = 0;
+        if (!eglChooseConfig(egl_display_, cfg_attrs, &egl_config_, 1, &num) || num <= 0) return false;
+        if (!eglBindAPI(EGL_OPENGL_ES_API)) return false;
+
+        static const EGLint ctx_attrs[] = {
+            EGL_CONTEXT_CLIENT_VERSION, 2,
+            EGL_NONE
+        };
+        egl_context_ = eglCreateContext(egl_display_, egl_config_, EGL_NO_CONTEXT, ctx_attrs);
+        if (egl_context_ == EGL_NO_CONTEXT) return false;
+        return true;
+    }
+
+    void shutdown_gpu() {
+        if (gl_vbo_) glDeleteBuffers(1, &gl_vbo_);
+        gl_vbo_ = 0;
+        if (gl_program_) glDeleteProgram(gl_program_);
+        gl_program_ = 0;
+        if (egl_display_ != EGL_NO_DISPLAY) {
+            eglMakeCurrent(egl_display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            if (egl_context_ != EGL_NO_CONTEXT) eglDestroyContext(egl_display_, egl_context_);
+            eglTerminate(egl_display_);
+        }
+        egl_context_ = EGL_NO_CONTEXT;
+        egl_display_ = EGL_NO_DISPLAY;
+        egl_config_ = nullptr;
+    }
+
+    void destroy_gpu_output(OutputState& os) {
+        if (os.texture) {
+            if (egl_display_ != EGL_NO_DISPLAY && os.egl_surface != EGL_NO_SURFACE && egl_context_ != EGL_NO_CONTEXT) {
+                eglMakeCurrent(egl_display_, os.egl_surface, os.egl_surface, egl_context_);
+                glDeleteTextures(1, &os.texture);
+            }
+            os.texture = 0;
+        }
+        if (os.egl_surface != EGL_NO_SURFACE && egl_display_ != EGL_NO_DISPLAY) {
+            eglDestroySurface(egl_display_, os.egl_surface);
+            os.egl_surface = EGL_NO_SURFACE;
+        }
+        if (os.egl_window) {
+            wl_egl_window_destroy(os.egl_window);
+            os.egl_window = nullptr;
+        }
+        os.gpu_ready = false;
+        os.tex_w = 0;
+        os.tex_h = 0;
+    }
+
+    bool ensure_gpu_output(OutputState& os) {
+        if (egl_display_ == EGL_NO_DISPLAY || egl_context_ == EGL_NO_CONTEXT) return false;
+
+        if (!os.egl_window) {
+            os.egl_window = wl_egl_window_create(os.surface, os.width, os.height);
+            if (!os.egl_window) return false;
+        } else {
+            wl_egl_window_resize(os.egl_window, os.width, os.height, 0, 0);
+        }
+
+        if (os.egl_surface == EGL_NO_SURFACE) {
+            os.egl_surface = eglCreateWindowSurface(
+                egl_display_, egl_config_,
+                reinterpret_cast<EGLNativeWindowType>(os.egl_window), nullptr);
+            if (os.egl_surface == EGL_NO_SURFACE) return false;
+        }
+
+        if (!eglMakeCurrent(egl_display_, os.egl_surface, os.egl_surface, egl_context_)) return false;
+
+        if (gl_program_ == 0) {
+            const char* vs_src =
+                "attribute vec2 a_pos;\n"
+                "attribute vec2 a_uv;\n"
+                "varying vec2 v_uv;\n"
+                "void main(){ v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+            const char* fs_src =
+                "precision mediump float;\n"
+                "varying vec2 v_uv;\n"
+                "uniform sampler2D u_tex;\n"
+                "uniform float u_opacity;\n"
+                "void main(){ vec4 c = texture2D(u_tex, v_uv); gl_FragColor = vec4(c.rgb * u_opacity, c.a * u_opacity); }\n";
+
+            GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_src);
+            GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
+            if (!vs || !fs) return false;
+
+            gl_program_ = glCreateProgram();
+            glAttachShader(gl_program_, vs);
+            glAttachShader(gl_program_, fs);
+            glBindAttribLocation(gl_program_, 0, "a_pos");
+            glBindAttribLocation(gl_program_, 1, "a_uv");
+            glLinkProgram(gl_program_);
+            glDeleteShader(vs);
+            glDeleteShader(fs);
+
+            GLint linked = 0;
+            glGetProgramiv(gl_program_, GL_LINK_STATUS, &linked);
+            if (!linked) {
+                char log[1024];
+                GLsizei len = 0;
+                glGetProgramInfoLog(gl_program_, sizeof(log), &len, log);
+                fprintf(stderr, "[salute] shader link failed: %.*s\n", static_cast<int>(len), log);
+                glDeleteProgram(gl_program_);
+                gl_program_ = 0;
+                return false;
+            }
+            u_opacity_ = glGetUniformLocation(gl_program_, "u_opacity");
+        }
+        if (gl_vbo_ == 0) glGenBuffers(1, &gl_vbo_);
+
+        if (!os.texture) {
+            glGenTextures(1, &os.texture);
+            glBindTexture(GL_TEXTURE_2D, os.texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        os.gpu_ready = true;
+        return true;
+    }
+
+    void render_frame_gpu(OutputState& os, int frame, double fade_factor) {
+        if (!os.gpu_ready) return;
+        if (!eglMakeCurrent(egl_display_, os.egl_surface, os.egl_surface, egl_context_)) return;
+
+        RenderConfig cfg;
+        cfg.size_ratio = opts_->size_ratio;
+        cfg.pos_x = opts_->pos_x;
+        cfg.pos_y = opts_->pos_y;
+        cfg.offset_x = opts_->offset_x;
+        cfg.offset_y = opts_->offset_y;
+        cfg.opacity = opts_->opacity * fade_factor;
+        cfg.flip = opts_->flip;
+
+        int rx, ry, rw, rh;
+        compute_rect(os.width, os.height, animation_info_.width, animation_info_.height, cfg, rx, ry, rw, rh);
+        if (rw <= 0 || rh <= 0) return;
+
+        int x_start = std::max(0, -rx);
+        int x_end = std::min(rw, os.width - rx);
+        int y_start = std::max(0, -ry);
+        int y_end = std::min(rh, os.height - ry);
+        if (x_end <= x_start || y_end <= y_start) return;
+
+        const size_t tmp_size = static_cast<size_t>(rw) * static_cast<size_t>(rh);
+        if (os.tmp.size() != tmp_size) os.tmp.resize(tmp_size);
+        render_lottie_frame(*animation_info_.animation, frame, os.tmp, rw, rh);
+
+        glViewport(0, 0, os.width, os.height);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(gl_program_);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        glBindTexture(GL_TEXTURE_2D, os.texture);
+        if (os.tex_w != rw || os.tex_h != rh) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rw, rh, 0, GL_RGBA, GL_UNSIGNED_BYTE, os.tmp.data());
+            os.tex_w = rw;
+            os.tex_h = rh;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, os.tmp.data());
+        }
+
+        const float left = (2.0f * static_cast<float>(rx + x_start) / static_cast<float>(os.width)) - 1.0f;
+        const float right = (2.0f * static_cast<float>(rx + x_end) / static_cast<float>(os.width)) - 1.0f;
+        const float top = 1.0f - (2.0f * static_cast<float>(ry + y_start) / static_cast<float>(os.height));
+        const float bottom = 1.0f - (2.0f * static_cast<float>(ry + y_end) / static_cast<float>(os.height));
+
+        const float u0 = static_cast<float>(x_start) / static_cast<float>(rw);
+        const float u1 = static_cast<float>(x_end) / static_cast<float>(rw);
+        const float v0 = static_cast<float>(y_start) / static_cast<float>(rh);
+        const float v1 = static_cast<float>(y_end) / static_cast<float>(rh);
+        const float ul = cfg.flip ? (1.0f - u0) : u0;
+        const float ur = cfg.flip ? (1.0f - u1) : u1;
+
+        const float vertices[] = {
+            left,  top,    ul, v0,
+            right, top,    ur, v0,
+            left,  bottom, ul, v1,
+            right, bottom, ur, v1,
+        };
+
+        glBindBuffer(GL_ARRAY_BUFFER, gl_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STREAM_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(0));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
+        glUniform1f(u_opacity_, std::clamp(static_cast<float>(cfg.opacity), 0.0f, 1.0f));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        eglSwapBuffers(egl_display_, os.egl_surface);
+    }
+#endif
+
+    void cleanup() {
+        for (auto& os : outputs_) {
+#ifdef ENABLE_WAYLAND_GPU
+            destroy_gpu_output(os);
+#endif
+            os.buf.reset();
+            if (os.input_region) wl_region_destroy(os.input_region);
+            if (os.surface) wl_surface_attach(os.surface, nullptr, 0, 0);
+            if (os.layer_surface) zwlr_layer_surface_v1_destroy(os.layer_surface);
+            if (os.xdg_output) zxdg_output_v1_destroy(os.xdg_output);
+            if (os.surface) wl_surface_destroy(os.surface);
+            if (os.output) wl_output_destroy(os.output);
+            os.input_region = nullptr;
+            os.layer_surface = nullptr;
+            os.xdg_output = nullptr;
+            os.surface = nullptr;
+            os.output = nullptr;
+        }
+        outputs_.clear();
+#ifdef ENABLE_WAYLAND_GPU
+        shutdown_gpu();
+#endif
+        if (xdg_output_manager_) zxdg_output_manager_v1_destroy(xdg_output_manager_);
+        xdg_output_manager_ = nullptr;
+        if (layer_shell_) zwlr_layer_shell_v1_destroy(layer_shell_);
+        layer_shell_ = nullptr;
+        if (shm_) wl_shm_destroy(shm_);
+        shm_ = nullptr;
+        if (compositor_) wl_compositor_destroy(compositor_);
+        compositor_ = nullptr;
+        if (registry_) wl_registry_destroy(registry_);
+        registry_ = nullptr;
+        if (display_) wl_display_disconnect(display_);
+        display_ = nullptr;
     }
 
     void create_layer_surface(OutputState& os) {
@@ -337,19 +719,11 @@ private:
     static void layer_surface_configure(void* data, zwlr_layer_surface_v1* surf,
                                         uint32_t serial, uint32_t w, uint32_t h) {
         auto* os = static_cast<OutputState*>(data);
+        if (!os->owner) return;
         os->width = std::max(1, static_cast<int>(w));
         os->height = std::max(1, static_cast<int>(h));
         zwlr_layer_surface_v1_ack_configure(surf, serial);
-
-        if (!os->buf) {
-            os->buf = std::make_unique<ShmBuffer>();
-            if (!os->buf->create(os->shm, os->width, os->height)) {
-                fprintf(stderr, "[salute] failed to create SHM buffer %dx%d\n", os->width, os->height);
-            } else {
-                os->configured = true;
-                printf("[salute] output configured size=%dx%d\n", os->width, os->height);
-            }
-        }
+        os->owner->configure_output(*os);
     }
 
     static void layer_surface_closed(void* data, zwlr_layer_surface_v1*) {
@@ -440,6 +814,16 @@ private:
     zxdg_output_manager_v1* xdg_output_manager_ = nullptr;
     std::vector<OutputState> outputs_;
     bool has_argb8888_ = false;
+    bool gpu_enabled_ = false;
+
+#ifdef ENABLE_WAYLAND_GPU
+    EGLDisplay egl_display_ = EGL_NO_DISPLAY;
+    EGLContext egl_context_ = EGL_NO_CONTEXT;
+    EGLConfig egl_config_ = nullptr;
+    GLuint gl_program_ = 0;
+    GLuint gl_vbo_ = 0;
+    GLint u_opacity_ = -1;
+#endif
 
     const AppOptions* opts_ = nullptr;
     AnimationInfo animation_info_;

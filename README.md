@@ -90,6 +90,7 @@ lottie-salute --asset animation.json [OPTIONS]
 | `--opacity FLOAT` | Opacity (`0..1`) | `1.0` |
 | `--duration-ms INT` | Max playback duration in milliseconds (`0` means auto) | `0` |
 | `--fps INT` | Render FPS cap (`0` means animation FPS) | `0` |
+| `--gpu MODE` | Wayland GPU mode: `auto`, `on`, `off` | `auto` |
 | `--backend NAME` | Force backend: `wayland` or `x11` | auto |
 | `--output NAME` | Target output name (e.g. `eDP-1`) | all outputs |
 | `--loop` | Loop animation | off |
@@ -99,6 +100,19 @@ lottie-salute --asset animation.json [OPTIONS]
 | `--fade-in-ms INT` | Fade-in duration in milliseconds (also enables fade-in) | `800` |
 | `--fade-out-ms INT` | Fade-out duration in milliseconds (also enables fade-out) | `800` |
 | `-h, --help` | Show help | |
+
+### GPU Modes (Wayland)
+
+```bash
+# Auto: try GPU first, fallback to CPU if unavailable
+lottie-salute --asset salute.json --backend wayland --gpu auto
+
+# Force GPU: fail if GPU path is not available
+lottie-salute --asset salute.json --backend wayland --gpu on
+
+# Force CPU path on Wayland
+lottie-salute --asset salute.json --backend wayland --gpu off
+```
 
 ### Examples
 
@@ -138,6 +152,7 @@ lottie-salute --asset animation.json --backend x11
 ## Compatibility Notes
 
 - Wayland mode requires a compositor with `wlr-layer-shell` support.
+- GPU acceleration mode (`--gpu`) is available on Wayland backend only.
 - GNOME (Mutter) typically does not expose `wlr-layer-shell`, so Wayland backend may not work there.
 - X11 backend requires a working X11 session and the listed X11 development/runtime libraries.
 - At least one backend must be available at build time.

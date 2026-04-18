@@ -132,6 +132,7 @@ public:
             XImage* img;
             GC gc;
             std::vector<uint32_t> buf;
+            std::vector<uint32_t> tmp;
             int w, h;
         };
         std::vector<WinState> wins;
@@ -237,17 +238,32 @@ public:
                 int rx, ry, rw, rh;
                 compute_rect(ws.w, ws.h, animation_info_.width, animation_info_.height,
                             cfg, rx, ry, rw, rh);
+                if (rw <= 0 || rh <= 0) continue;
 
                 // Render at target resolution for crisp edges
-                std::vector<uint32_t> tmp(static_cast<size_t>(rw * rh));
-                render_lottie_frame(*animation_info_.animation, frame, tmp, rw, rh);
+                const size_t tmp_size = static_cast<size_t>(rw) * static_cast<size_t>(rh);
+                if (ws.tmp.size() != tmp_size) ws.tmp.resize(tmp_size);
+                render_lottie_frame(*animation_info_.animation, frame, ws.tmp, rw, rh);
 
-                memset(ws.buf.data(), 0, static_cast<size_t>(ws.w * ws.h * 4));
+                int x_start = std::max(0, -rx);
+                int x_end = std::min(rw, ws.w - rx);
+                int y_start = std::max(0, -ry);
+                int y_end = std::min(rh, ws.h - ry);
+                if (x_end <= x_start || y_end <= y_start) continue;
+
+                for (int y = y_start; y < y_end; ++y) {
+                    uint32_t* row = ws.buf.data() + (ry + y) * ws.w + rx;
+                    memset(row, 0, static_cast<size_t>((x_end - x_start) * 4));
+                }
 
                 blit_to_dst(ws.buf.data(), ws.w, ws.w, ws.h,
-                           tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity);
+                           ws.tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity);
 
-                XPutImage(dpy_, ws.win, ws.gc, ws.img, 0, 0, 0, 0, ws.w, ws.h);
+                XPutImage(dpy_, ws.win, ws.gc, ws.img,
+                          rx + x_start, ry + y_start,
+                          rx + x_start, ry + y_start,
+                          static_cast<unsigned int>(x_end - x_start),
+                          static_cast<unsigned int>(y_end - y_start));
             }
 
             XFlush(dpy_);

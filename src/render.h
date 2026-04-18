@@ -95,6 +95,29 @@ inline void blit_to_dst(uint32_t* dst, int dst_stride, int dst_w, int dst_h,
     int y_end = std::min(rh, dst_h - ry);
     const double clamped_opacity = std::clamp(opacity, 0.0, 1.0);
     const uint32_t opacity_scale = static_cast<uint32_t>(clamped_opacity * 255.0 + 0.5);
+    if (opacity_scale == 0) return;
+
+    if (opacity_scale == 255) {
+        for (int y = y_start; y < y_end; ++y) {
+            const uint32_t* src_row = src + y * rw;
+            uint32_t* dst_row = dst + (ry + y) * dst_stride + rx;
+            if (!flip) {
+                for (int x = x_start; x < x_end; ++x) {
+                    dst_row[x] = lottie_to_argb(src_row[x]);
+                }
+            } else {
+                for (int x = x_start; x < x_end; ++x) {
+                    dst_row[x] = lottie_to_argb(src_row[rw - 1 - x]);
+                }
+            }
+        }
+        return;
+    }
+
+    uint8_t scale_lut[256];
+    for (int i = 0; i < 256; ++i) {
+        scale_lut[i] = static_cast<uint8_t>((i * opacity_scale + 127) / 255);
+    }
 
     for (int y = y_start; y < y_end; ++y) {
         const uint32_t* src_row = src + y * rw;
@@ -102,14 +125,10 @@ inline void blit_to_dst(uint32_t* dst, int dst_stride, int dst_w, int dst_h,
         for (int x = x_start; x < x_end; ++x) {
             int sx = flip ? (rw - 1 - x) : x;
             uint32_t argb = lottie_to_argb(src_row[sx]);
-            uint32_t r = (argb >> 16) & 0xFF;
-            uint32_t g = (argb >> 8) & 0xFF;
-            uint32_t b = argb & 0xFF;
-            uint32_t a = (argb >> 24) & 0xFF;
-            r = (r * opacity_scale + 127) / 255;
-            g = (g * opacity_scale + 127) / 255;
-            b = (b * opacity_scale + 127) / 255;
-            a = (a * opacity_scale + 127) / 255;
+            uint32_t r = scale_lut[(argb >> 16) & 0xFF];
+            uint32_t g = scale_lut[(argb >> 8) & 0xFF];
+            uint32_t b = scale_lut[argb & 0xFF];
+            uint32_t a = scale_lut[(argb >> 24) & 0xFF];
             dst_row[x] = (a << 24) | (r << 16) | (g << 8) | b;
         }
     }

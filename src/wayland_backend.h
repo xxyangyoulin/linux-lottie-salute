@@ -24,6 +24,7 @@ struct AppOptions {
     bool fade_out = false;
     int fade_in_ms = 800;
     int fade_out_ms = 800;
+    std::string gpu = "auto"; // auto|on|off (Wayland only)
 };
 
 extern volatile sig_atomic_t g_interrupted;
