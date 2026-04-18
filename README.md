@@ -142,6 +142,7 @@ lottie-salute --asset animation.json --backend x11
 ## Test Assets
 
 - Input must be a Lottie/Bodymovin JSON file.
+- You can browse animations at [LottieFiles](https://lottiefiles.com/) and download the JSON format.
 - If you do not have one, download any small Lottie JSON sample and point `--asset` to that file.
 
 ## Troubleshooting
