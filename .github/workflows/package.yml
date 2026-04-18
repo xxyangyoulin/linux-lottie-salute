@@ -1,0 +1,121 @@
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-packages:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package_type: [deb, pacman]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            ruby \
+            ruby-dev \
+            rubygems \
+            librlottie-dev \
+            wayland-protocols \
+            libwayland-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrender-dev \
+            libxrandr-dev
+
+      - name: Install fpm
+        run: |
+          sudo gem install --no-document fpm
+
+      - name: Build and stage install tree
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build --config Release
+          rm -rf package-root
+          DESTDIR="$PWD/package-root" cmake --install build
+
+          install -d package-root/usr/share/doc/lottie-salute
+          install -m 644 README.md package-root/usr/share/doc/lottie-salute/README.md
+          install -m 644 LICENSE package-root/usr/share/doc/lottie-salute/LICENSE
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(sed -nE 's/^project\(lottie_salute VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          if [ -z "$VERSION" ]; then
+            echo "Failed to parse version from CMakeLists.txt" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create package
+        run: |
+          mkdir -p dist
+
+          if [ "${{ matrix.package_type }}" = "deb" ]; then
+            fpm -s dir -t deb \
+              -n lottie-salute \
+              -v "${{ steps.version.outputs.version }}" \
+              --iteration "${GITHUB_RUN_NUMBER}" \
+              --architecture amd64 \
+              --description "Lottie animation overlay for Wayland and X11" \
+              --license MIT \
+              --url "https://github.com/${GITHUB_REPOSITORY}" \
+              --depends "libc6" \
+              --depends "libstdc++6" \
+              --depends "libx11-6" \
+              --depends "libxext6" \
+              --depends "libxrender1" \
+              --depends "libxrandr2" \
+              --depends "libwayland-client0" \
+              --depends "librlottie0" \
+              -C package-root \
+              -p "dist/lottie-salute_VERSION_ARCH.deb" \
+              .
+          else
+            fpm -s dir -t pacman \
+              -n lottie-salute \
+              -v "${{ steps.version.outputs.version }}" \
+              --iteration "${GITHUB_RUN_NUMBER}" \
+              --architecture x86_64 \
+              --description "Lottie animation overlay for Wayland and X11" \
+              --license MIT \
+              --url "https://github.com/${GITHUB_REPOSITORY}" \
+              --depends "glibc" \
+              --depends "gcc-libs" \
+              --depends "libx11" \
+              --depends "libxext" \
+              --depends "libxrender" \
+              --depends "libxrandr" \
+              --depends "wayland" \
+              --depends "rlottie" \
+              --pacman-compression zstd \
+              -C package-root \
+              -p "dist/lottie-salute_VERSION_ARCH.pkg.tar.zst" \
+              .
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lottie-salute-${{ matrix.package_type }}-${{ steps.version.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
