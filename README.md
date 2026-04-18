@@ -2,6 +2,12 @@
 
 A lightweight Lottie animation overlay for Wayland and X11. Plays a Lottie animation on top of all windows, then exits.
 
+## Demo
+
+<video src="./demo.mp4" controls width="900"></video>
+
+[Download demo video](./demo.mp4)
+
 ## Quick Start
 
 ```bash
