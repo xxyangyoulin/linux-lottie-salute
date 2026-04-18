@@ -1,0 +1,11 @@
+build/
+.cache/
+.claude/
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+*.swp
+*~
+CMakeUserPresets.json
