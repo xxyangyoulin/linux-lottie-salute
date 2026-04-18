@@ -33,6 +33,8 @@ jobs:
             ruby \
             ruby-dev \
             rubygems \
+            libarchive-tools \
+            zstd \
             librlottie-dev \
             wayland-protocols \
             libwayland-dev \
@@ -44,6 +46,11 @@ jobs:
       - name: Install fpm
         run: |
           sudo gem install --no-document fpm
+
+      - name: Tooling sanity check
+        run: |
+          bsdtar --version
+          fpm --version
 
       - name: Build and stage install tree
         run: |
