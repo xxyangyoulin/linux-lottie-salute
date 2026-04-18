@@ -192,24 +192,31 @@ public:
             : (!opts.loop ? static_cast<int>(animation_info_.duration_ms / speed) : 0);
         auto next_frame = start;
         int64_t first_render_elapsed_ms = -1;
+        bool final_fade_committed = false;
 
         while (!g_interrupted) {
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
-            if (max_duration_ms > 0 && elapsed_ms >= max_duration_ms) break;
-
             const int anim_time_ms = static_cast<int>(elapsed_ms * speed);
-            if (!opts.loop && anim_time_ms >= animation_info_.duration_ms) break;
+            int frame_time_ms = anim_time_ms;
+            if (opts.loop) {
+                frame_time_ms = anim_time_ms % animation_info_.duration_ms;
+            } else {
+                frame_time_ms = std::min(anim_time_ms, animation_info_.duration_ms - 1);
+            }
 
             int frame = static_cast<int>(
-                ((anim_time_ms % animation_info_.duration_ms) / 1000.0) * animation_info_.frame_rate);
+                (frame_time_ms / 1000.0) * animation_info_.frame_rate);
             if (frame >= animation_info_.total_frames) break;
             if (first_render_elapsed_ms < 0) first_render_elapsed_ms = elapsed_ms;
-            const int64_t visible_elapsed_ms = elapsed_ms - first_render_elapsed_ms;
+            const int64_t raw_visible_elapsed_ms = elapsed_ms - first_render_elapsed_ms;
             const int visible_total_ms = max_duration_ms > 0
                 ? std::max<int64_t>(1, static_cast<int64_t>(max_duration_ms) - first_render_elapsed_ms)
                 : 0;
+            const int64_t visible_elapsed_ms = visible_total_ms > 0
+                ? std::clamp<int64_t>(raw_visible_elapsed_ms, 0, visible_total_ms)
+                : std::max<int64_t>(0, raw_visible_elapsed_ms);
 
             double fade_factor = 1.0;
             if (opts.fade_in) {
@@ -268,6 +275,46 @@ public:
             }
 
             XFlush(dpy_);
+
+            const bool reached_max_duration = (max_duration_ms > 0 && elapsed_ms >= max_duration_ms);
+            const bool reached_anim_end = (!opts.loop && anim_time_ms >= animation_info_.duration_ms);
+            if (reached_max_duration || (reached_anim_end && max_duration_ms == 0)) {
+                if (!final_fade_committed && opts.fade_out && max_duration_ms > 0) {
+                    RenderConfig final_cfg = cfg;
+                    final_cfg.opacity = 0.0;
+                    for (auto& ws : wins) {
+                        int rx, ry, rw, rh;
+                        compute_rect(ws.w, ws.h, animation_info_.width, animation_info_.height,
+                                    final_cfg, rx, ry, rw, rh);
+                        if (rw <= 0 || rh <= 0) continue;
+                        int x_start = std::max(0, -rx);
+                        int x_end = std::min(rw, ws.w - rx);
+                        int y_start = std::max(0, -ry);
+                        int y_end = std::min(rh, ws.h - ry);
+                        if (x_end <= x_start || y_end <= y_start) continue;
+
+                        const size_t tmp_size = static_cast<size_t>(rw) * static_cast<size_t>(rh);
+                        if (ws.tmp.size() != tmp_size) ws.tmp.resize(tmp_size);
+                        render_lottie_frame(*animation_info_.animation, frame, ws.tmp, rw, rh);
+
+                        for (int y = y_start; y < y_end; ++y) {
+                            uint32_t* row = ws.buf.data() + (ry + y) * ws.w + rx;
+                            memset(row, 0, static_cast<size_t>((x_end - x_start) * 4));
+                        }
+                        blit_to_dst(ws.buf.data(), ws.w, ws.w, ws.h,
+                                   ws.tmp.data(), rw, rh, rx, ry, final_cfg.flip, final_cfg.opacity, final_cfg.rotate_deg);
+                        XPutImage(dpy_, ws.win, ws.gc, ws.img,
+                                  rx + x_start, ry + y_start,
+                                  rx + x_start, ry + y_start,
+                                  static_cast<unsigned int>(x_end - x_start),
+                                  static_cast<unsigned int>(y_end - y_start));
+                    }
+                    XFlush(dpy_);
+                    std::this_thread::sleep_for(std::chrono::microseconds(frame_dur_us));
+                    final_fade_committed = true;
+                }
+                break;
+            }
 
             next_frame += std::chrono::microseconds(frame_dur_us);
             auto now = std::chrono::steady_clock::now();

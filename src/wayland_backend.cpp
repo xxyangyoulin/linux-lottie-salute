@@ -242,6 +242,7 @@ public:
         int64_t first_render_elapsed_ms = -1;
         int no_target_ticks = 0;
         bool runtime_gpu_fallback_attempted = false;
+        bool final_fade_committed = false;
         int max_no_target_ticks = std::max(60, target_fps * 2);
 
         while (!g_interrupted) {
@@ -250,13 +251,16 @@ public:
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start).count();
 
-            if (max_duration_ms > 0 && elapsed_ms >= max_duration_ms) break;
-
             const int anim_time_ms = static_cast<int>(elapsed_ms * speed);
-            if (!opts_->loop && anim_time_ms >= animation_info_.duration_ms) break;
+            int frame_time_ms = anim_time_ms;
+            if (opts_->loop) {
+                frame_time_ms = anim_time_ms % animation_info_.duration_ms;
+            } else {
+                frame_time_ms = std::min(anim_time_ms, animation_info_.duration_ms - 1);
+            }
 
             int frame = static_cast<int>(
-                ((anim_time_ms % animation_info_.duration_ms) / 1000.0) * animation_info_.frame_rate);
+                (frame_time_ms / 1000.0) * animation_info_.frame_rate);
             if (frame >= animation_info_.total_frames) break;
 
             bool has_render_target = false;
@@ -290,10 +294,13 @@ public:
             }
             no_target_ticks = 0;
             if (first_render_elapsed_ms < 0) first_render_elapsed_ms = elapsed_ms;
-            const int64_t visible_elapsed_ms = elapsed_ms - first_render_elapsed_ms;
+            const int64_t raw_visible_elapsed_ms = elapsed_ms - first_render_elapsed_ms;
             const int visible_total_ms = max_duration_ms > 0
                 ? std::max<int64_t>(1, static_cast<int64_t>(max_duration_ms) - first_render_elapsed_ms)
                 : 0;
+            const int64_t visible_elapsed_ms = visible_total_ms > 0
+                ? std::clamp<int64_t>(raw_visible_elapsed_ms, 0, visible_total_ms)
+                : std::max<int64_t>(0, raw_visible_elapsed_ms);
 
             double fade_factor = 1.0;
             if (opts_->fade_in) {
@@ -321,6 +328,27 @@ public:
             }
 
             wl_display_flush(display_);
+
+            const bool reached_max_duration = (max_duration_ms > 0 && elapsed_ms >= max_duration_ms);
+            const bool reached_anim_end = (!opts_->loop && anim_time_ms >= animation_info_.duration_ms);
+            if (reached_max_duration || (reached_anim_end && max_duration_ms == 0)) {
+                if (!final_fade_committed && opts_->fade_out && max_duration_ms > 0) {
+                    for (auto& os : outputs_) {
+                        if (!os.configured) continue;
+                        if (gpu_enabled_) {
+#ifdef ENABLE_WAYLAND_GPU
+                            if (os.gpu_ready) render_frame_gpu(os, frame, 0.0);
+#endif
+                        } else {
+                            if (os.buf) render_frame(os, frame, 0.0);
+                        }
+                    }
+                    wl_display_flush(display_);
+                    std::this_thread::sleep_for(std::chrono::microseconds(frame_dur_us));
+                    final_fade_committed = true;
+                }
+                break;
+            }
 
             next_frame += std::chrono::microseconds(frame_dur_us);
             auto now = std::chrono::steady_clock::now();
@@ -542,7 +570,7 @@ private:
                 "varying vec2 v_uv;\n"
                 "uniform sampler2D u_tex;\n"
                 "uniform float u_opacity;\n"
-                "void main(){ vec4 c = texture2D(u_tex, v_uv); gl_FragColor = vec4(c.rgb * u_opacity, c.a * u_opacity); }\n";
+                "void main(){ vec4 c = texture2D(u_tex, v_uv); gl_FragColor = vec4(c.bgr * u_opacity, c.a * u_opacity); }\n";
 
             GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_src);
             GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fs_src);
