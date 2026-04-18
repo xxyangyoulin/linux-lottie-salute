@@ -232,6 +232,7 @@ public:
             cfg.offset_x = opts.offset_x;
             cfg.offset_y = opts.offset_y;
             cfg.opacity = opts.opacity * fade_factor;
+            cfg.rotate_deg = opts.rotate_deg;
             cfg.flip = opts.flip;
 
             for (auto& ws : wins) {
@@ -257,7 +258,7 @@ public:
                 }
 
                 blit_to_dst(ws.buf.data(), ws.w, ws.w, ws.h,
-                           ws.tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity);
+                           ws.tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity, cfg.rotate_deg);
 
                 XPutImage(dpy_, ws.win, ws.gc, ws.img,
                           rx + x_start, ry + y_start,

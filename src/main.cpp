@@ -28,6 +28,7 @@ static void print_usage(const char* prog) {
     printf("  --offset-y INT   Vertical pixel offset (default: 0)\n");
     printf("  --speed FLOAT    Playback speed multiplier (default: 1.0)\n");
     printf("  --opacity FLOAT  Opacity 0..1 (default: 1.0)\n");
+    printf("  --rotate FLOAT   Rotation in degrees (default: 0)\n");
     printf("  --duration-ms N  Max playback time in ms (default: 0=auto)\n");
     printf("  --fps INT        Render FPS cap (default: animation FPS)\n");
     printf("  --backend NAME   Backend: wayland|x11 (default: auto)\n");
@@ -71,6 +72,9 @@ int main(int argc, char** argv) {
         } else if (key == "--opacity") {
             if (i + 1 >= argc) { fprintf(stderr, "Missing value for --opacity\n"); return 1; }
             opts.opacity = std::atof(argv[++i]);
+        } else if (key == "--rotate") {
+            if (i + 1 >= argc) { fprintf(stderr, "Missing value for --rotate\n"); return 1; }
+            opts.rotate_deg = std::atof(argv[++i]);
         } else if (key == "--duration-ms") {
             if (i + 1 >= argc) { fprintf(stderr, "Missing value for --duration-ms\n"); return 1; }
             opts.duration_ms = std::atoi(argv[++i]);

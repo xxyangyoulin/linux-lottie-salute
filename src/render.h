@@ -66,6 +66,7 @@ struct RenderConfig {
     int offset_x = 0;
     int offset_y = 0;
     double opacity = 1.0;
+    double rotate_deg = 0.0;
     bool flip = false;
 };
 
@@ -88,7 +89,7 @@ inline void compute_rect(int screen_w, int screen_h, int anim_w, int anim_h,
 // dst: destination buffer in ARGB format
 inline void blit_to_dst(uint32_t* dst, int dst_stride, int dst_w, int dst_h,
                         const uint32_t* src, int rw, int rh,
-                        int rx, int ry, bool flip, double opacity) {
+                        int rx, int ry, bool flip, double opacity, double rotate_deg = 0.0) {
     int x_start = std::max(0, -rx);
     int x_end = std::min(rw, dst_w - rx);
     int y_start = std::max(0, -ry);
@@ -96,8 +97,10 @@ inline void blit_to_dst(uint32_t* dst, int dst_stride, int dst_w, int dst_h,
     const double clamped_opacity = std::clamp(opacity, 0.0, 1.0);
     const uint32_t opacity_scale = static_cast<uint32_t>(clamped_opacity * 255.0 + 0.5);
     if (opacity_scale == 0) return;
+    const double norm_deg = std::fmod(rotate_deg, 360.0);
+    const bool has_rotation = std::abs(norm_deg) > 1e-6;
 
-    if (opacity_scale == 255) {
+    if (!has_rotation && opacity_scale == 255) {
         for (int y = y_start; y < y_end; ++y) {
             const uint32_t* src_row = src + y * rw;
             uint32_t* dst_row = dst + (ry + y) * dst_stride + rx;
@@ -119,12 +122,43 @@ inline void blit_to_dst(uint32_t* dst, int dst_stride, int dst_w, int dst_h,
         scale_lut[i] = static_cast<uint8_t>((i * opacity_scale + 127) / 255);
     }
 
+    if (!has_rotation) {
+        for (int y = y_start; y < y_end; ++y) {
+            const uint32_t* src_row = src + y * rw;
+            uint32_t* dst_row = dst + (ry + y) * dst_stride + rx;
+            for (int x = x_start; x < x_end; ++x) {
+                int sx = flip ? (rw - 1 - x) : x;
+                uint32_t argb = lottie_to_argb(src_row[sx]);
+                uint32_t r = scale_lut[(argb >> 16) & 0xFF];
+                uint32_t g = scale_lut[(argb >> 8) & 0xFF];
+                uint32_t b = scale_lut[argb & 0xFF];
+                uint32_t a = scale_lut[(argb >> 24) & 0xFF];
+                dst_row[x] = (a << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+        return;
+    }
+
+    const double rad = norm_deg * 3.14159265358979323846 / 180.0;
+    const double c = std::cos(rad);
+    const double s = std::sin(rad);
+    const double cx = (rw - 1) * 0.5;
+    const double cy = (rh - 1) * 0.5;
+
     for (int y = y_start; y < y_end; ++y) {
-        const uint32_t* src_row = src + y * rw;
         uint32_t* dst_row = dst + (ry + y) * dst_stride + rx;
+        const double dy = static_cast<double>(y) - cy;
         for (int x = x_start; x < x_end; ++x) {
-            int sx = flip ? (rw - 1 - x) : x;
-            uint32_t argb = lottie_to_argb(src_row[sx]);
+            const double dx = static_cast<double>(x) - cx;
+            double src_xf = c * dx + s * dy + cx;
+            double src_yf = -s * dx + c * dy + cy;
+            int sy = static_cast<int>(std::lround(src_yf));
+            int sx = static_cast<int>(std::lround(src_xf));
+            if (sy < 0 || sy >= rh || sx < 0 || sx >= rw) {
+                continue;
+            }
+            if (flip) sx = rw - 1 - sx;
+            uint32_t argb = lottie_to_argb(src[sy * rw + sx]);
             uint32_t r = scale_lut[(argb >> 16) & 0xFF];
             uint32_t g = scale_lut[(argb >> 8) & 0xFF];
             uint32_t b = scale_lut[argb & 0xFF];

@@ -88,6 +88,7 @@ lottie-salute --asset animation.json [OPTIONS]
 | `--offset-y INT` | Vertical pixel offset | `0` |
 | `--speed FLOAT` | Playback speed multiplier | `1.0` |
 | `--opacity FLOAT` | Opacity (`0..1`) | `1.0` |
+| `--rotate FLOAT` | Rotation in degrees | `0` |
 | `--duration-ms INT` | Max playback duration in milliseconds (`0` means auto) | `0` |
 | `--fps INT` | Render FPS cap (`0` means animation FPS) | `0` |
 | `--gpu MODE` | Wayland GPU mode: `auto`, `on`, `off` | `auto` |
@@ -134,6 +135,9 @@ lottie-salute --asset salute.json --fade-in --fade-out
 
 # Customize fade durations
 lottie-salute --asset salute.json --fade-in --fade-in-ms 1500 --fade-out --fade-out-ms 1200 --duration-ms 5000
+
+# Rotate 20 degrees
+lottie-salute --asset salute.json --rotate 20
 ```
 
 ## Backend Selection

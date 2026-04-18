@@ -14,6 +14,7 @@ struct AppOptions {
     int offset_y = 0;
     double speed = 1.0;
     double opacity = 1.0;
+    double rotate_deg = 0.0;
     int duration_ms = 0;
     int fps = 0;
     std::string backend;

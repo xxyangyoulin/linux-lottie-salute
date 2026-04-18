@@ -370,6 +370,7 @@ private:
         cfg.offset_x = opts_->offset_x;
         cfg.offset_y = opts_->offset_y;
         cfg.opacity = opts_->opacity * fade_factor;
+        cfg.rotate_deg = opts_->rotate_deg;
         cfg.flip = opts_->flip;
 
         int rx, ry, rw, rh;
@@ -394,7 +395,7 @@ private:
         }
 
         blit_to_dst(os.buf->data, os.width, os.width, os.height,
-                    os.tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity);
+                    os.tmp.data(), rw, rh, rx, ry, cfg.flip, cfg.opacity, cfg.rotate_deg);
 
         wl_surface_attach(os.surface, os.buf->buffer, 0, 0);
         if (x_end > x_start && y_end > y_start) {
@@ -594,6 +595,7 @@ private:
         cfg.offset_x = opts_->offset_x;
         cfg.offset_y = opts_->offset_y;
         cfg.opacity = opts_->opacity * fade_factor;
+        cfg.rotate_deg = opts_->rotate_deg;
         cfg.flip = opts_->flip;
 
         int rx, ry, rw, rh;
@@ -626,10 +628,10 @@ private:
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, os.tmp.data());
         }
 
-        const float left = (2.0f * static_cast<float>(rx + x_start) / static_cast<float>(os.width)) - 1.0f;
-        const float right = (2.0f * static_cast<float>(rx + x_end) / static_cast<float>(os.width)) - 1.0f;
-        const float top = 1.0f - (2.0f * static_cast<float>(ry + y_start) / static_cast<float>(os.height));
-        const float bottom = 1.0f - (2.0f * static_cast<float>(ry + y_end) / static_cast<float>(os.height));
+        const float px_left = static_cast<float>(rx + x_start);
+        const float px_right = static_cast<float>(rx + x_end);
+        const float px_top = static_cast<float>(ry + y_start);
+        const float px_bottom = static_cast<float>(ry + y_end);
 
         const float u0 = static_cast<float>(x_start) / static_cast<float>(rw);
         const float u1 = static_cast<float>(x_end) / static_cast<float>(rw);
@@ -638,11 +640,45 @@ private:
         const float ul = cfg.flip ? (1.0f - u0) : u0;
         const float ur = cfg.flip ? (1.0f - u1) : u1;
 
+        float px0 = px_left,  py0 = px_top;
+        float px1 = px_right, py1 = px_top;
+        float px2 = px_left,  py2 = px_bottom;
+        float px3 = px_right, py3 = px_bottom;
+        if (std::abs(cfg.rotate_deg) > 1e-6) {
+            const float rad = static_cast<float>(cfg.rotate_deg * 3.14159265358979323846 / 180.0);
+            const float cr = std::cos(rad);
+            const float sr = std::sin(rad);
+            const float cx = 0.5f * (px_left + px_right);
+            const float cy = 0.5f * (px_top + px_bottom);
+            auto rot = [&](float& x, float& y) {
+                const float dx = x - cx;
+                const float dy = y - cy;
+                x = cx + cr * dx - sr * dy;
+                y = cy + sr * dx + cr * dy;
+            };
+            rot(px0, py0);
+            rot(px1, py1);
+            rot(px2, py2);
+            rot(px3, py3);
+        }
+
+        auto to_ndc_x = [&](float px) {
+            return (2.0f * px / static_cast<float>(os.width)) - 1.0f;
+        };
+        auto to_ndc_y = [&](float py) {
+            return 1.0f - (2.0f * py / static_cast<float>(os.height));
+        };
+
+        const float vx0 = to_ndc_x(px0), vy0 = to_ndc_y(py0);
+        const float vx1 = to_ndc_x(px1), vy1 = to_ndc_y(py1);
+        const float vx2 = to_ndc_x(px2), vy2 = to_ndc_y(py2);
+        const float vx3 = to_ndc_x(px3), vy3 = to_ndc_y(py3);
+
         const float vertices[] = {
-            left,  top,    ul, v0,
-            right, top,    ur, v0,
-            left,  bottom, ul, v1,
-            right, bottom, ur, v1,
+            vx0, vy0, ul, v0,
+            vx1, vy1, ur, v0,
+            vx2, vy2, ul, v1,
+            vx3, vy3, ur, v1,
         };
 
         glBindBuffer(GL_ARRAY_BUFFER, gl_vbo_);
