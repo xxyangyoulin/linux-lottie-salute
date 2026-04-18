@@ -2,6 +2,9 @@
 
 A lightweight Lottie animation overlay for Wayland and X11. Plays a Lottie animation on top of all windows, then exits.
 
+> [!TIP]
+> Find animations on [LottieFiles](https://lottiefiles.com/) and download the JSON format for `--asset`.
+
 ## Demo
 
 <video src="./demo.mp4" controls width="900"></video>
@@ -142,7 +145,6 @@ lottie-salute --asset animation.json --backend x11
 ## Test Assets
 
 - Input must be a Lottie/Bodymovin JSON file.
-- You can browse animations at [LottieFiles](https://lottiefiles.com/) and download the JSON format.
 - If you do not have one, download any small Lottie JSON sample and point `--asset` to that file.
 
 ## Troubleshooting
