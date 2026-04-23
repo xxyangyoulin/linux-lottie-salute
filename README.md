@@ -9,7 +9,7 @@ A lightweight Lottie animation overlay for Wayland and X11. Plays a Lottie anima
 
 <video src="./demo.mp4" controls width="900"></video>
 
-[Download demo video](./demo.mp4)
+![Demo](./demo.gif)
 
 ## Fun Use with Codex
 
